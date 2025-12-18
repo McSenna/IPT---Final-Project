@@ -1,54 +1,88 @@
-from fastapi import FastAPI
+import os
+
+import httpx
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import httpx
 
-# Create the app
-app = FastAPI()
 
-# Allow frontend to connect
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
+ALLOWED_MODEL_NAME = "chain"
+LOCAL_API_TOKEN = os.getenv("LOCAL_API_TOKEN")
 
-# What a message looks like
+app = FastAPI(title="Local Chat Backend", version="1.0.0")
+
+# Restrictive CORS: allow only local frontends (Vite default ports)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost",
+        "http://127.0.0.1",
+    ],
+    allow_credentials=True,
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+
 class Message(BaseModel):
-   role: str      # "user" or "assistant"
-   content: str   # the text
+    role: str
+    content: str
 
-# What the frontend sends us
+
 class ChatRequest(BaseModel):
-   model: str
-   messages: list[Message]
-
-# Stream response from Ollama
-async def get_ollama_response(data):
-   async with httpx.AsyncClient(timeout=None) as client:
-       async with client.stream("POST", "http://localhost:11434/api/chat", json=data) as r:
-           async for line in r.aiter_lines():
-               if line:
-                   yield f"data: {line}\n\n"
+    model: str
+    messages: list[Message]
+    stream: bool | None = True
 
 
+async def get_ollama_response(data: dict):
+    """
+    Open a streaming connection to Ollama and relay chunks immediately
+    to the client as server‑sent events.
+    """
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream("POST", OLLAMA_CHAT_URL, json=data) as r:
+            async for line in r.aiter_lines():
+                if not line:
+                    continue
+                # Relay raw JSON chunk as SSE event without post‑processing
+                yield f"data: {line}\n\n"
 
 
-# Health check - is server running?
 @app.get("/")
 async def home():
-   return {"status": "ok"}
+    return {"status": "ok", "model": ALLOWED_MODEL_NAME}
 
-# Get list of models
-@app.get("/api/models")
-async def models():
-   async with httpx.AsyncClient() as client:
-       r = await client.get("http://localhost:11434/api/tags")
-       return r.json()
 
-# Main chat endpoint
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
-   data = {
-       "model": req.model,
-       "messages": [{"role": m.role, "content": m.content} for m in req.messages],
-       "stream": True
-   }
-   return StreamingResponse(get_ollama_response(data), media_type="text/event-stream")
+async def chat(
+    req: ChatRequest,
+    request: Request,
+    x_local_token: str | None = Header(default=None, convert_underscores=False),
+):
+    # Enforce fixed model name
+    if req.model != ALLOWED_MODEL_NAME:
+        raise HTTPException(status_code=400, detail="Invalid model. Use 'chain'.")
+
+    # Optional local API token validation
+    if LOCAL_API_TOKEN is not None:
+        if not x_local_token or x_local_token != LOCAL_API_TOKEN:
+            raise HTTPException(status_code=401, detail="Invalid or missing token.")
+
+    payload = {
+        "model": ALLOWED_MODEL_NAME,
+        "messages": [
+            {"role": m.role, "content": m.content}
+            for m in req.messages
+        ],
+        "stream": True,  # always stream from Ollama
+    }
+
+    return StreamingResponse(
+        get_ollama_response(payload),
+        media_type="text/event-stream",
+    )
