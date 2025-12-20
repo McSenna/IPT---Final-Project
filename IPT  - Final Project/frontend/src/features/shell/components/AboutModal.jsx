@@ -36,8 +36,8 @@ export function AboutModal({ open, onClose }) {
           without seeing sound.
         </p>
         <p>
-          We believe that natural language is a design tool. By centering the experience around a
-          calm conversational loop, the UI adapts to what you say, not the other way around.
+          Natural language, in our opinion, is a tool for design. By focusing the encounter on a
+          calm conversational loop, the UI responds to your words rather than the other way around.
         </p>
       </section>
 
